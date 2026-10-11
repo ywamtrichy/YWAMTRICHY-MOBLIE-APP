@@ -1,0 +1,65 @@
+# Builds the YWAM Beneficiary Android app (APK) on GitHub's servers.
+# How to use: GitHub -> "Actions" tab -> "Build Android APK" -> "Run workflow".
+# When it finishes (about 8-10 minutes) download "YWAM-Beneficiary-APK" at the bottom of the run page.
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install packages
+        run: npm install --no-audit --no-fund
+
+      - name: Create the Android project (only if it is not already in the repository)
+        run: |
+          if [ ! -d android ]; then npx cap add android; fi
+
+      - name: Allow plain http:// to the office server
+        run: |
+          if ! grep -q usesCleartextTraffic android/app/src/main/AndroidManifest.xml; then
+            sed -i 's|<application|<application android:usesCleartextTraffic="true"|' android/app/src/main/AndroidManifest.xml
+          fi
+          grep -n usesCleartextTraffic android/app/src/main/AndroidManifest.xml
+
+      - name: App icon (optional - the build still works if this step fails)
+        continue-on-error: true
+        run: |
+          npm install --no-save --no-audit --no-fund @capacitor/assets
+          npx @capacitor/assets generate --android --iconBackgroundColor '#ffffff'
+
+      - name: Copy the phone app into the Android project
+        run: npx cap sync android
+
+      - name: Build the APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Name the file
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk YWAM-Beneficiary.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YWAM-Beneficiary-APK
+          path: YWAM-Beneficiary.apk
+          if-no-files-found: error

@@ -1,0 +1,12 @@
+{
+  "appId": "org.ywamtrichy.beneficiary",
+  "appName": "YWAM Beneficiary",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "http",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}

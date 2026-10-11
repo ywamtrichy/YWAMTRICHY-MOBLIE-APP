@@ -1,0 +1,17 @@
+{
+  "name": "ywam-beneficiary-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "description": "YWAM - TRICHY Beneficiary Management - Android app (Capacitor wrapper of the phone web app)",
+  "scripts": {
+    "sync-www": "node tools/sync-www.js",
+    "android:add": "npx cap add android",
+    "android:sync": "npx cap sync android",
+    "android:open": "npx cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/cli": "^8.5.2",
+    "@capacitor/core": "^8.5.2"
+  }
+}
