@@ -21,6 +21,450 @@
   function loadCfg() { try { return JSON.parse(localStorage.getItem(LS_KEY)) || {}; } catch (e) { return {}; } }
   function saveCfg() { localStorage.setItem(LS_KEY, JSON.stringify(cfg)); }
 
+  // ---------- CSV & PDF helpers ----------
+  function downloadFile(filename, content, mimeType) {
+    try {
+      var blob = new Blob([content], { type: mimeType });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 500);
+    } catch (e) {
+      var encoded = encodeURIComponent(content);
+      var a = document.createElement('a');
+      a.href = 'data:' + mimeType + ';charset=utf-8,' + encoded;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { document.body.removeChild(a); }, 500);
+    }
+  }
+
+  function csvEscape(val) {
+    if (val == null) return '""';
+    var s = String(val);
+    if (s.indexOf('"') >= 0 || s.indexOf(',') >= 0 || s.indexOf('\n') >= 0 || s.indexOf('\r') >= 0) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return '"' + s + '"';
+  }
+
+  function parseCSV(text) {
+    var lines = [];
+    var row = [];
+    var inQuotes = false;
+    var currentField = '';
+    text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    if (text.charCodeAt(0) === 0xFEFF) { text = text.slice(1); }
+    for (var i = 0; i < text.length; i++) {
+      var c = text[i];
+      var next = text[i + 1];
+      if (inQuotes) {
+        if (c === '"') {
+          if (next === '"') {
+            currentField += '"';
+            i++;
+          } else {
+            inQuotes = false;
+          }
+        } else {
+          currentField += c;
+        }
+      } else {
+        if (c === '"') {
+          inQuotes = true;
+        } else if (c === ',') {
+          row.push(currentField.trim());
+          currentField = '';
+        } else if (c === '\n') {
+          row.push(currentField.trim());
+          currentField = '';
+          if (row.length > 1 || (row.length === 1 && row[0] !== '')) {
+            lines.push(row);
+          }
+          row = [];
+        } else {
+          currentField += c;
+        }
+      }
+    }
+    if (currentField || row.length > 0) {
+      row.push(currentField.trim());
+      if (row.length > 1 || (row.length === 1 && row[0] !== '')) {
+        lines.push(row);
+      }
+    }
+    return lines;
+  }
+
+  var FIELD_MAP = {
+    'name': 'name', 'beneficiary name': 'name', 'full name': 'name',
+    'surname': 'surname', 'last name': 'surname',
+    'category': 'category',
+    'beneficiary no': 'beneficiary_no', 'beneficiary_no': 'beneficiary_no', 'beneficiary id': 'beneficiary_no', 'id': 'beneficiary_no',
+    'village': 'village', 'village name': 'village',
+    'gender': 'gender', 'sex': 'gender',
+    'age': 'age',
+    'dob': 'dob', 'date of birth': 'dob', 'birth date': 'dob',
+    'dod': 'dod', 'date of death': 'dod',
+    'mobile': 'mobile', 'phone': 'mobile', 'contact': 'mobile', 'mobile no': 'mobile', 'phone number': 'mobile',
+    'alt mobile': 'alt_mobile', 'alt_mobile': 'alt_mobile', 'alternate mobile': 'alt_mobile',
+    'email': 'email', 'email address': 'email',
+    'aadhar': 'aadhar', 'aadhaar': 'aadhar', 'aadhar no': 'aadhar',
+    'address': 'address',
+    'notes': 'notes', 'note': 'notes'
+  };
+
+  function showImportModal(data) {
+    var existing = $('#importModal');
+    if (existing) existing.remove();
+    if (!data) return;
+    var overlay = document.createElement('div');
+    overlay.id = 'importModal';
+    overlay.className = 'modal-overlay';
+    if (data.loading) {
+      overlay.innerHTML = '<div class="modal-box">' +
+        '<div class="modal-head"><h3>Importing CSV Data</h3></div>' +
+        '<div class="modal-body">' +
+        '<div class="import-badge loading">&#8987; Processing record <span id="impProg">' + data.current + '</span> of ' + data.total + '&hellip;</div>' +
+        '<div class="muted">Please wait while beneficiaries are being imported and synced to the server.</div>' +
+        '</div></div>';
+    } else if (data.done) {
+      var errsHtml = '';
+      if (data.errors && data.errors.length) {
+        errsHtml = '<div class="import-errors"><strong>Issues encountered (' + data.errors.length + '):</strong><ul>' +
+          data.errors.slice(0, 50).map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('') +
+          '</ul></div>';
+      }
+      overlay.innerHTML = '<div class="modal-box">' +
+        '<div class="modal-head"><h3>CSV Import Result</h3><button class="modal-close" data-act="close-modal">&times;</button></div>' +
+        '<div class="modal-body">' +
+        '<div class="import-badge success">&#10004; Successfully imported ' + data.imported + ' of ' + data.total + ' beneficiaries</div>' +
+        errsHtml +
+        '</div>' +
+        '<div class="modal-foot"><button class="btn sm" data-act="close-modal">Done</button></div>' +
+        '</div>';
+    }
+    document.body.appendChild(overlay);
+  }
+
+  function updateImportProgress(curr, tot) {
+    var p = $('#impProg');
+    if (p) p.textContent = curr;
+  }
+
+  function exportPeopleCSV() {
+    var list = people.filter(function (b) { return (!ui.cat || b.category === ui.cat) && matches(b, ui.q); });
+    if (!list.length) { toast('No people to export'); return; }
+    var headers = ['S.No', 'Beneficiary ID', 'Name', 'Surname', 'Category', 'Village', 'Gender', 'Age', 'Date of Birth', 'Date of Death', 'Mobile', 'Alt Mobile', 'Email', 'Aadhar', 'Address', 'Notes'];
+    var rows = [headers.map(csvEscape).join(',')];
+    list.forEach(function (b, idx) {
+      rows.push([
+        csvEscape(idx + 1),
+        csvEscape(b.beneficiary_no || ''),
+        csvEscape(b.name || ''),
+        csvEscape(b.surname || ''),
+        csvEscape(b.category || ''),
+        csvEscape(b.village || ''),
+        csvEscape(b.gender || ''),
+        csvEscape(b.age || ''),
+        csvEscape(b.dob || ''),
+        csvEscape(b.dod || ''),
+        csvEscape(b.mobile || ''),
+        csvEscape(b.alt_mobile || ''),
+        csvEscape(b.email || ''),
+        csvEscape(b.aadhar || ''),
+        csvEscape(b.address || ''),
+        csvEscape(b.notes || '')
+      ].join(','));
+    });
+    var csv = '\uFEFF' + rows.join('\r\n');
+    var fname = (ui.cat ? ('beneficiaries_' + ui.cat.replace(/[^a-zA-Z0-9_-]/g, '_')) : 'beneficiaries') + '.csv';
+    downloadFile(fname, csv, 'text/csv;charset=utf-8;');
+    toast('Exported ' + list.length + ' beneficiaries to CSV');
+  }
+
+  function exportPeoplePDF() {
+    var list = people.filter(function (b) { return (!ui.cat || b.category === ui.cat) && matches(b, ui.q); });
+    if (!list.length) { toast('No people to export'); return; }
+    var org = (boot && boot.headerLines && boot.headerLines[0]) || 'YWAM - TRICHY';
+    var sub = (boot && boot.headerLines && boot.headerLines[1]) || 'Beneficiary Management';
+    var catLabel = ui.cat ? ('Category: ' + ui.cat) : 'All Categories';
+    var now = new Date().toLocaleDateString();
+    var h = '<div class="print-header">' +
+      '<h2>' + esc(org) + '</h2>' +
+      '<div class="subtitle">' + esc(sub) + ' &ndash; Beneficiary Report</div>' +
+      '<div class="meta"><span>' + esc(catLabel) + '</span><span>Total: ' + list.length + ' people</span><span>Date: ' + esc(now) + '</span></div>' +
+      '</div>' +
+      '<table class="print-table">' +
+      '<thead><tr><th>#</th><th>Beneficiary ID</th><th>Name</th><th>Category</th><th>Village</th><th>Gender</th><th>Age</th><th>Mobile</th></tr></thead>' +
+      '<tbody>' +
+      list.map(function (b, i) {
+        return '<tr><td>' + (i + 1) + '</td><td>' + esc(b.beneficiary_no || '-') + '</td><td><strong>' + esc(fullName(b)) + '</strong></td>' +
+          '<td>' + esc(b.category || '-') + '</td><td>' + esc(b.village || '-') + '</td><td>' + esc(b.gender || '-') + '</td>' +
+          '<td>' + esc(b.age || '-') + '</td><td>' + esc(b.mobile || '-') + '</td></tr>';
+      }).join('') +
+      '</tbody></table>' +
+      '<div class="print-sig">' +
+      '<div class="sig-box">Prepared By</div>' +
+      '<div class="sig-box">Authorized Signature</div>' +
+      '</div>';
+    go('print', { title: 'Beneficiary List PDF', content: h });
+  }
+
+  function importPeopleCSV(file) {
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function (evt) {
+      try {
+        var text = evt.target.result;
+        var grid = parseCSV(text);
+        if (!grid.length) { toast('CSV file is empty'); return; }
+        var headerRow = grid[0];
+        var colMap = {};
+        headerRow.forEach(function (h, idx) {
+          var cleanH = String(h || '').trim().toLowerCase().replace(/[\s_-]+/g, ' ');
+          if (FIELD_MAP[cleanH]) colMap[FIELD_MAP[cleanH]] = idx;
+        });
+
+        if (colMap['name'] == null) {
+          toast('CSV must contain a "Name" column.');
+          return;
+        }
+
+        var dataRows = grid.slice(1).filter(function (r) {
+          return r.some(function (cell) { return String(cell || '').trim() !== ''; });
+        });
+
+        if (!dataRows.length) {
+          toast('CSV has no data rows.');
+          return;
+        }
+
+        showImportModal({ loading: true, total: dataRows.length, current: 0 });
+
+        var imported = 0;
+        var errors = [];
+        var defaultCat = (boot && boot.categories && boot.categories[0]) || 'General';
+
+        function processRow(i) {
+          if (i >= dataRows.length) {
+            api('/api/mobile/people').then(function (res) {
+              people = res.people;
+              fillPeople();
+              showImportModal({
+                done: true,
+                total: dataRows.length,
+                imported: imported,
+                errors: errors
+              });
+              toast('Imported ' + imported + ' beneficiaries');
+            }).catch(function () {
+              showImportModal({
+                done: true,
+                total: dataRows.length,
+                imported: imported,
+                errors: errors
+              });
+            });
+            return;
+          }
+
+          var row = dataRows[i];
+          var item = {};
+          Object.keys(colMap).forEach(function (fieldKey) {
+            var val = row[colMap[fieldKey]];
+            item[fieldKey] = val != null ? String(val).trim() : '';
+          });
+
+          if (!item.name) {
+            errors.push('Row ' + (i + 2) + ': Missing name');
+            updateImportProgress(imported + errors.length, dataRows.length);
+            processRow(i + 1);
+            return;
+          }
+
+          if (!item.category) item.category = defaultCat;
+
+          api('/api/mobile/people', { method: 'POST', body: item })
+            .then(function () {
+              imported++;
+              updateImportProgress(imported + errors.length, dataRows.length);
+              processRow(i + 1);
+            })
+            .catch(function (err) {
+              errors.push('Row ' + (i + 2) + ' (' + item.name + '): ' + err.message);
+              updateImportProgress(imported + errors.length, dataRows.length);
+              processRow(i + 1);
+            });
+        }
+
+        processRow(0);
+      } catch (err) {
+        toast('Failed to parse CSV: ' + err.message);
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function printPersonPDF(id) {
+    api('/api/mobile/people/' + encodeURIComponent(id)).then(function (r) {
+      var b = r.person;
+      var org = (boot && boot.headerLines && boot.headerLines[0]) || 'YWAM - TRICHY';
+      var u = photoUrl(b);
+      var now = new Date().toLocaleDateString();
+      var rows = [
+        ['Beneficiary ID', b.beneficiary_no], ['Category', b.category],
+        ['Full Name', fullName(b)], ['Village', b.village],
+        ['Gender', b.gender], ['Age', b.age],
+        ['Date of Birth', b.dob], ['Date of Death', b.dod],
+        ['Mobile', b.mobile], ['Alt Mobile', b.alt_mobile],
+        ['Email', b.email], ['Aadhar', b.aadhar],
+        ['Address', b.address], ['Notes', b.notes]
+      ].filter(function (x) { return x[1]; });
+
+      var h = '<div class="print-header">' +
+        '<h2>' + esc(org) + '</h2>' +
+        '<div class="subtitle">Official Beneficiary Profile</div>' +
+        '<div class="meta"><span>ID: ' + esc(b.beneficiary_no || b.id) + '</span><span>Generated: ' + esc(now) + '</span></div>' +
+        '</div>' +
+        '<div style="display:flex;gap:16px;margin-bottom:14px;align-items:flex-start">' +
+        (u ? '<img src="' + esc(u) + '" style="width:110px;height:125px;border-radius:6px;border:1px solid #cbd5e1;object-fit:cover" />' :
+             '<div style="width:110px;height:125px;border-radius:6px;border:1px solid #cbd5e1;background:#e2e8f0;display:flex;align-items:center;justify-content:center;font-size:36px;font-weight:700;color:#64748b">' + esc((b.name||'?')[0]) + '</div>') +
+        '<div style="flex:1"><h3 style="margin:0 0 6px;font-size:20px;color:#1e293b">' + esc(fullName(b)) + '</h3>' +
+        '<div>' + chip(b.category) + '</div>' +
+        '<div style="margin-top:8px;font-size:12px;color:#64748b">' + esc([b.village, b.mobile].filter(Boolean).join(' \u00b7 ') || '') + '</div></div>' +
+        '</div>' +
+        '<table class="print-table">' +
+        '<tbody>' +
+        rows.map(function (row) {
+          return '<tr><td style="width:30%;font-weight:700;background:#f8fafc">' + esc(row[0]) + '</td><td>' + esc(row[1]) + '</td></tr>';
+        }).join('') +
+        '</tbody></table>' +
+        '<div class="print-sig" style="margin-top:48px">' +
+        '<div class="sig-box">Beneficiary Signature / Thumb</div>' +
+        '<div class="sig-box">Authorized Officer Signature</div>' +
+        '</div>';
+      go('print', { title: 'Beneficiary Profile PDF', content: h });
+    }).catch(function (e) { toast(e.message); });
+  }
+
+  function exportAttendanceCSV() {
+    if (!people.length) { toast('No data to export'); return; }
+    var headers = ['S.No', 'Beneficiary ID', 'Name', 'Category', 'Village', 'Month', 'Status'];
+    var rows = [headers.map(csvEscape).join(',')];
+    people.forEach(function (b, idx) {
+      var status = ui.att[b.id] || 'Not marked';
+      rows.push([
+        csvEscape(idx + 1),
+        csvEscape(b.beneficiary_no || ''),
+        csvEscape(fullName(b)),
+        csvEscape(b.category || ''),
+        csvEscape(b.village || ''),
+        csvEscape(ui.month || thisMonth()),
+        csvEscape(status)
+      ].join(','));
+    });
+    var csv = '\uFEFF' + rows.join('\r\n');
+    downloadFile('attendance_' + (ui.month || thisMonth()) + '.csv', csv, 'text/csv;charset=utf-8;');
+    toast('Exported attendance to CSV');
+  }
+
+  function exportAttendancePDF() {
+    if (!people.length) { toast('No attendance to export'); return; }
+    var org = (boot && boot.headerLines && boot.headerLines[0]) || 'YWAM - TRICHY';
+    var p = 0, a = 0;
+    people.forEach(function (b) { if (ui.att[b.id] === 'Present') p++; else if (ui.att[b.id] === 'Absent') a++; });
+    var un = people.length - p - a;
+    var now = new Date().toLocaleDateString();
+    var h = '<div class="print-header">' +
+      '<h2>' + esc(org) + '</h2>' +
+      '<div class="subtitle">Monthly Attendance Sheet &ndash; ' + esc(ui.month || thisMonth()) + '</div>' +
+      '<div class="meta"><span>Present: ' + p + ' | Absent: ' + a + ' | Not marked: ' + un + '</span><span>Total: ' + people.length + '</span><span>Date: ' + esc(now) + '</span></div>' +
+      '</div>' +
+      '<table class="print-table">' +
+      '<thead><tr><th>#</th><th>Beneficiary ID</th><th>Name</th><th>Category</th><th>Village</th><th>Status</th></tr></thead>' +
+      '<tbody>' +
+      people.map(function (b, i) {
+        var s = ui.att[b.id] || 'Not marked';
+        var stCol = s === 'Present' ? 'color:#166534;font-weight:700' : (s === 'Absent' ? 'color:#991b1b;font-weight:700' : 'color:#64748b');
+        return '<tr><td>' + (i + 1) + '</td><td>' + esc(b.beneficiary_no || '-') + '</td><td><strong>' + esc(fullName(b)) + '</strong></td>' +
+          '<td>' + esc(b.category || '-') + '</td><td>' + esc(b.village || '-') + '</td><td style="' + stCol + '">' + esc(s) + '</td></tr>';
+      }).join('') +
+      '</tbody></table>' +
+      '<div class="print-sig">' +
+      '<div class="sig-box">Staff Incharge</div>' +
+      '<div class="sig-box">Authorized Signature</div>' +
+      '</div>';
+    go('print', { title: 'Attendance PDF (' + (ui.month || thisMonth()) + ')', content: h });
+  }
+
+  function exportEventCSV(eventId) {
+    api('/api/mobile/events/' + encodeURIComponent(eventId)).then(function (r) {
+      var e = r.event, ps = e.participants || [];
+      if (!ps.length) { toast('No participants to export'); return; }
+      var headers = ['S.No', 'Participant Name', 'Beneficiary ID', 'Village', 'Mobile', 'Event Name', 'Event Date', 'Venue'];
+      var rows = [headers.map(csvEscape).join(',')];
+      ps.forEach(function (x, idx) {
+        rows.push([
+          csvEscape(idx + 1),
+          csvEscape(x.name || ''),
+          csvEscape(x.beneficiary_no || ''),
+          csvEscape(x.village || ''),
+          csvEscape(x.mobile || ''),
+          csvEscape(e.name || ''),
+          csvEscape(e.date || ''),
+          csvEscape(e.venue || '')
+        ].join(','));
+      });
+      var csv = '\uFEFF' + rows.join('\r\n');
+      var fname = 'event_' + (e.name || 'participants').replace(/[^a-zA-Z0-9_-]/g, '_') + '.csv';
+      downloadFile(fname, csv, 'text/csv;charset=utf-8;');
+      toast('Exported ' + ps.length + ' participants to CSV');
+    }).catch(function (e) { toast(e.message); });
+  }
+
+  function exportEventPDF(eventId) {
+    api('/api/mobile/events/' + encodeURIComponent(eventId)).then(function (r) {
+      var e = r.event, ps = e.participants || [];
+      var org = (boot && boot.headerLines && boot.headerLines[0]) || 'YWAM - TRICHY';
+      var now = new Date().toLocaleDateString();
+      var h = '<div class="print-header">' +
+        '<h2>' + esc(org) + '</h2>' +
+        '<div class="subtitle">Event Participant List &ndash; ' + esc(e.name) + '</div>' +
+        '<div class="meta"><span>Date: ' + esc(e.date || '-') + ' | Venue: ' + esc(e.venue || '-') + '</span><span>Total: ' + ps.length + ' participants</span><span>Printed: ' + esc(now) + '</span></div>' +
+        '</div>' +
+        (e.description ? '<div style="margin:8px 0;font-size:11px;color:#475569"><strong>About Event:</strong> ' + esc(e.description) + '</div>' : '') +
+        '<table class="print-table">' +
+        '<thead><tr><th>#</th><th>Participant Name</th><th>Beneficiary ID</th><th>Village</th><th>Mobile</th><th style="width:120px">Signature</th></tr></thead>' +
+        '<tbody>' +
+        (ps.length ? ps.map(function (x, i) {
+          return '<tr><td>' + (i + 1) + '</td><td><strong>' + esc(x.name) + '</strong></td><td>' + esc(x.beneficiary_no || '-') + '</td><td>' + esc(x.village || '-') + '</td><td>' + esc(x.mobile || '-') + '</td><td></td></tr>';
+        }).join('') : '<tr><td colspan="6" style="text-align:center">No participants recorded</td></tr>') +
+        '</tbody></table>' +
+        '<div class="print-sig">' +
+        '<div class="sig-box">Event Coordinator</div>' +
+        '<div class="sig-box">Authorized Signature</div>' +
+        '</div>';
+      go('print', { title: 'Event PDF (' + esc(e.name) + ')', content: h });
+    }).catch(function (e) { toast(e.message); });
+  }
+
+  function screenPrint(p) {
+    frame(p.title || 'Print / Export PDF',
+      '<div class="print-wrap">' +
+      '<div class="print-sheet" id="printContent">' + p.content + '</div>' +
+      '</div>',
+      { right: '<button data-act="do-print" aria-label="Print">&#128424; Print</button>' }
+    );
+  }
+
   var cfg = loadCfg();            // { server, key, machineId, label }
   var boot = null;                // categories, themes, header lines
   var people = [];                // lite list
@@ -153,10 +597,18 @@
     var cats = (boot && boot.categories) || [];
     frame('People', '<input id="q" type="search" placeholder="Search name, village, number, mobile" value="' + esc(ui.q) + '" />' +
       '<select id="cat" style="margin:8px 0 10px"><option value="">All categories</option>' + cats.map(function (c) { return '<option' + (ui.cat === c ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('') + '</select>' +
+      '<div class="action-bar">' +
+        '<button class="btn-act" data-act="export-people-csv"><span class="ic">&#128229;</span> Export CSV</button>' +
+        '<button class="btn-act" data-act="export-people-pdf"><span class="ic">&#128196;</span> Export PDF</button>' +
+        '<button class="btn-act" data-act="import-people-csv"><span class="ic">&#128228;</span> Import CSV</button>' +
+        '<input type="file" id="importCsvInput" accept=".csv,text/csv" style="display:none;" />' +
+      '</div>' +
       '<div class="sum" id="cnt"></div><div id="plist"></div><button class="fab" data-act="addp" aria-label="Add">+</button>',
       { right: '<button data-act="reload" aria-label="Refresh">&#8635;</button>' });
     $('#q').oninput = function () { ui.q = this.value; fillPeople(); };
     $('#cat').onchange = function () { ui.cat = this.value; fillPeople(); };
+    var ci = $('#importCsvInput');
+    if (ci) ci.onchange = function () { if (this.files && this.files[0]) { importPeopleCSV(this.files[0]); this.value = ''; } };
     fillPeople();
   }
   function matches(b, q) {
@@ -186,7 +638,8 @@
       frame(fullName(b), '<div class="card hero"><div class="photo">' + (u ? '<img src="' + esc(u) + '" alt="" />' : esc((b.name || '?')[0].toUpperCase())) + '</div>' +
         '<div style="font-size:20px;font-weight:800">' + esc(fullName(b)) + '</div>' + chip(b.category) + '</div>' +
         '<div class="card">' + rows.map(function (r2) { return '<div class="kv"><div class="k">' + esc(r2[0]) + '</div><div class="v">' + r2[1] + '</div></div>'; }).join('') + '</div>' +
-        '<div class="row"><button class="btn" data-act="card" data-id="' + esc(b.id) + '">ID Card</button><button class="btn sec" data-act="editp" data-id="' + esc(b.id) + '">Edit</button></div>');
+        '<div class="row"><button class="btn" data-act="card" data-id="' + esc(b.id) + '">ID Card</button><button class="btn sec" data-act="editp" data-id="' + esc(b.id) + '">Edit</button></div>' +
+        '<button class="btn sec" data-act="print-person-pdf" data-id="' + esc(b.id) + '" style="margin-top:8px"><span class="ic">&#128424;</span> Print Profile PDF</button>');
     }).catch(function (e) { toast(e.message); back(); });
   }
 
@@ -303,7 +756,13 @@
   function screenAttendance() {
     if (!ui.month) ui.month = thisMonth();
     frame('Attendance', '<input id="mon" type="month" value="' + esc(ui.month) + '" /><input id="aq" type="search" placeholder="Search" style="margin-top:8px" value="' + esc(ui.attQ) + '" />' +
-      '<div class="sum" id="asum" style="margin-top:10px">Loading\u2026</div><button class="btn sec sm" id="allP" style="margin-bottom:10px">Mark all Present</button><div id="alist"></div>');
+      '<div class="sum" id="asum" style="margin-top:10px">Loading\u2026</div>' +
+      '<div class="action-bar">' +
+        '<button class="btn sec sm" id="allP" style="flex:1">Mark all Present</button>' +
+        '<button class="btn-act" data-act="export-att-csv"><span class="ic">&#128229;</span> Export CSV</button>' +
+        '<button class="btn-act" data-act="export-att-pdf"><span class="ic">&#128196;</span> Export PDF</button>' +
+      '</div>' +
+      '<div id="alist"></div>');
     $('#mon').onchange = function () { ui.month = this.value || thisMonth(); screenAttendance(); };
     $('#aq').oninput = function () { ui.attQ = this.value; fillAtt(); };
     $('#allP').onclick = function () {
@@ -348,7 +807,12 @@
       var e = r.event, ps = e.participants || [];
       frame(e.name, '<div class="card"><div class="kv"><div class="k">Date</div><div class="v">' + esc(e.date || '-') + '</div></div><div class="kv"><div class="k">Venue</div><div class="v">' + esc(e.venue || '-') + '</div></div>' +
         (e.description ? '<div class="kv"><div class="k">About</div><div class="v">' + esc(e.description) + '</div></div>' : '') + '</div>' +
-        '<button class="btn sm" data-act="addpart" data-id="' + esc(e.id) + '" style="margin-bottom:10px">+ Add participant</button><div class="sum">' + ps.length + ' participants</div>' +
+        '<div class="action-bar">' +
+          '<button class="btn sm" data-act="addpart" data-id="' + esc(e.id) + '" style="flex:1">+ Add participant</button>' +
+          '<button class="btn-act" data-act="export-event-csv" data-id="' + esc(e.id) + '"><span class="ic">&#128229;</span> Export CSV</button>' +
+          '<button class="btn-act" data-act="export-event-pdf" data-id="' + esc(e.id) + '"><span class="ic">&#128196;</span> Export PDF</button>' +
+        '</div>' +
+        '<div class="sum">' + ps.length + ' participants</div>' +
         (ps.length ? ps.map(function (x) {
           return '<div class="item"><div class="t"><div class="n">' + esc(x.name) + '</div><div class="s">' + esc([x.beneficiary_no, x.village, x.mobile].filter(Boolean).join(' \u00b7 ') || '-') + '</div></div><button class="x" data-act="delpart" data-id="' + esc(e.id) + '" data-pid="' + esc(x.id) + '" aria-label="Remove">&#10005;</button></div>';
         }).join('') : '<div class="empty">No participants yet.</div>'));
@@ -393,7 +857,8 @@
 
   var SCREENS = {
     activate: screenActivate, people: screenPeople, person: screenPerson, form: screenForm, card: screenCard,
-    attendance: screenAttendance, events: screenEvents, event: screenEvent, eventForm: screenEventForm, partForm: screenParticipantForm, more: screenMore
+    attendance: screenAttendance, events: screenEvents, event: screenEvent, eventForm: screenEventForm, partForm: screenParticipantForm, more: screenMore,
+    print: screenPrint
   };
 
   // ---------- one click handler for everything ----------
@@ -406,6 +871,16 @@
     else if (act === 'addp') go('form', {});
     else if (act === 'editp') go('form', { id: id });
     else if (act === 'card') go('card', { id: id });
+    else if (act === 'print-person-pdf') printPersonPDF(id);
+    else if (act === 'export-people-csv') exportPeopleCSV();
+    else if (act === 'export-people-pdf') exportPeoplePDF();
+    else if (act === 'import-people-csv') { var inp = $('#importCsvInput'); if (inp) inp.click(); }
+    else if (act === 'export-att-csv') exportAttendanceCSV();
+    else if (act === 'export-att-pdf') exportAttendancePDF();
+    else if (act === 'export-event-csv') exportEventCSV(id);
+    else if (act === 'export-event-pdf') exportEventPDF(id);
+    else if (act === 'do-print') window.print();
+    else if (act === 'close-modal') { var m = $('#importModal'); if (m) m.remove(); }
     else if (act === 'mark') mark(id, el.getAttribute('data-s'));
     else if (act === 'newevent') go('eventForm');
     else if (act === 'event') go('event', { id: id });
